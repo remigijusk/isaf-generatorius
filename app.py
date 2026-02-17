@@ -53,7 +53,7 @@ def generate_isaf_xml(df, is_purchase_mode):
         etree.SubElement(file_desc, "DataType").text = "F"
         etree.SubElement(file_desc, "SoftwareCompanyName").text = TAX_PAYER['Name']
         etree.SubElement(file_desc, "SoftwareName").text = "Tutas_ISAF_Converter"
-        etree.SubElement(file_desc, "SoftwareVersion").text = "2.0"
+        etree.SubElement(file_desc, "SoftwareVersion").text = "2.1"
         etree.SubElement(file_desc, "RegistrationNumber").text = TAX_PAYER['RegistrationNumber']
         etree.SubElement(file_desc, "NumberOfParts").text = "1"
         etree.SubElement(file_desc, "PartNumber").text = "1"
@@ -71,32 +71,51 @@ def generate_isaf_xml(df, is_purchase_mode):
             partner_tag = "CustomerInfo"
 
         for sask_nr, items in month_data.groupby(col_nr):
+            if pd.isna(sask_nr): continue
             first_row = items.iloc[0]
             sask_data = first_row[col_data].strftime('%Y-%m-%d')
+            
             inv = etree.SubElement(parent_block, "Invoice")
             etree.SubElement(inv, "InvoiceNo").text = str(sask_nr)
             
+            # --- PARTNERIO INFORMACIJA (Griežta XSD seka) ---
             partner = etree.SubElement(inv, partner_tag)
+            
+            # 1. PVM Kodas (VATRegistrationNumber) - PRIVALOMAS i.SAF struktūrai
             pvm_val = str(first_row[col_pvm_info]).strip()
-            if pvm_val and pvm_val.lower() != 'nan':
-                etree.SubElement(partner, "VATRegistrationNumber").text = pvm_val
+            v_pvm = etree.SubElement(partner, "VATRegistrationNumber")
+            if pvm_val and pvm_val.lower() != 'nan' and pvm_val != '':
+                v_pvm.text = pvm_val
+            else:
+                v_pvm.text = "ND" # Jei PVM kodo nėra, rašome ND, kad nesugriūtų seka
+            
+            # 2. Įmonės kodas (RegistrationNumber) - VISADA ND
             etree.SubElement(partner, "RegistrationNumber").text = "ND"
+            
+            # 3. Valstybė
             etree.SubElement(partner, "Country").text = "LT"
+            
+            # 4. Pavadinimas
             etree.SubElement(partner, "Name").text = str(first_row[col_partneris])
 
+            # --- SĄSKAITOS INFORMACIJA ---
             etree.SubElement(inv, "InvoiceDate").text = sask_data
+            
             total_sum = items[col_suma].sum()
             inv_type = "SF"
             if total_sum < 0:
                 inv_type = "DS" if is_purchase_mode else "KS"
             etree.SubElement(inv, "InvoiceType").text = inv_type
             
+            # Privalomi tušti laukai pagal XSD
             etree.SubElement(inv, "SpecialTaxation").text = ""
             etree.SubElement(inv, "References")
+            
             etree.SubElement(inv, "VATPointDate").text = sask_data
             if is_purchase_mode:
                 etree.SubElement(inv, "RegistrationAccountDate").text = sask_data
 
+            # --- SUMŲ BLOKAS ---
             doc_totals = etree.SubElement(inv, "DocumentTotals")
             for _, sub_row in items.iterrows():
                 total_node = etree.SubElement(doc_totals, "DocumentTotal")
@@ -104,7 +123,9 @@ def generate_isaf_xml(df, is_purchase_mode):
                 etree.SubElement(total_node, "TaxCode").text = "PVM1"
                 etree.SubElement(total_node, "TaxPercentage").text = "21"
                 etree.SubElement(total_node, "Amount").text = clean_val(sub_row[col_tax])
+                
                 if not is_purchase_mode:
+                    # Privaloma pardavimams i.SAF 1.2 versijoje
                     etree.SubElement(total_node, "VATPointDate2").text = sask_data
 
         xml_files[filename] = etree.tostring(root, encoding='UTF-8', xml_declaration=True, pretty_print=True)
@@ -112,36 +133,33 @@ def generate_isaf_xml(df, is_purchase_mode):
     return xml_files
 
 # =========================================================
-# STREAMLIT UI (Interneto langas)
+# STREAMLIT UI
 # =========================================================
-st.set_page_config(page_title="i.SAF Konverteris - UAB TUTAS")
+st.set_page_config(page_title="i.SAF Konverteris - UAB TUTAS", layout="centered")
 
-st.title("📄 i.SAF XML Generatorius (v2.0)")
-st.subheader("UAB TUTAS (įm. k. 304294805)")
+st.title("📄 i.SAF XML Generatorius (v2.1)")
+st.info("Sutvarkyta XSD struktūra partnerių informacijai (Pirkimai/Pardavimai).")
 
 uploaded_file = st.file_uploader("1. Įkelkite Odoo Excel failą (.xlsx)", type="xlsx")
 mode = st.radio("2. Dokumentų tipas:", ("PIRKIMAI (Gaunamos sąskaitos)", "PARDAVIMAI (Išrašomos sąskaitos)"))
 
 if uploaded_file is not None:
-    if st.button("GENERUOTI XML FAILUS"):
+    if st.button("🚀 GENERUOTI XML FAILUS"):
         try:
             df = pd.read_excel(uploaded_file)
             is_purchase = True if "PIRKIMAI" in mode else False
             
-            # Generuojame XML'us
             xml_dict = generate_isaf_xml(df, is_purchase)
             
             if len(xml_dict) > 0:
-                # Sukuriame ZIP archyvą atsisiuntimui
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                     for filename, content in xml_dict.items():
                         zip_file.writestr(filename, content)
                 
-                st.success(f"Sėkmingai sugeneruota {len(xml_dict)} failų!")
-                
+                st.success(f"✅ Sėkmingai sugeneruota {len(xml_dict)} failų!")
                 st.download_button(
-                    label="📥 ATSISIŲSTI XML FAILUS (ZIP)",
+                    label="📥 ATSISIŲSTI ZIP ARCHYVĄ",
                     data=zip_buffer.getvalue(),
                     file_name=f"iSAF_TUTAS_{datetime.now().strftime('%Y%m%d')}.zip",
                     mime="application/zip"
@@ -150,4 +168,4 @@ if uploaded_file is not None:
                 st.warning("Nerasta jokių duomenų generavimui.")
                 
         except Exception as e:
-            st.error(f"Klaida apdorojant failą: {e}")
+            st.error(f"❌ Klaida: {e}")
